@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# --- CONFIGURATION ---
+# Servers network configuration
+ZONE_NAME="homelab.local"
+DNS_SERVER_1_IP="192.168.159.10"
+DNS_SERVER_2_IP="192.168.159.11"
+DNS_SERVER_3_IP="192.168.159.12"
+DNS_VIRTUAL_IP="192.168.159.53"
+# ---------------------
+
 # Disable systemd-resolved which binds to port 53 and conflicts with bind
 systemctl disable --now systemd-resolved
 rm -f /etc/resolv.conf
@@ -38,3 +47,88 @@ options {
     };
 };
 EOF
+
+# Define the zone and allow transfer to the two secondary servers
+cat <<EOF > /etc/bind/named.conf.local
+zone "$ZONE_NAME" {
+    type master;
+    file "/etc/bind/zones/db.$ZONE_NAME";
+    allow-transfer { $DNS_SERVER_2_IP; $DNS_SERVER_3_IP; };
+    also-notify { $DNS_SERVER_2_IP; $DNS_SERVER_3_IP; };
+};
+EOF
+
+# Create the zone file
+mkdir -p /etc/bind/zones
+cat <<EOF > /etc/bind/zones/db.$ZONE_NAME
+;
+; BIND data file for $ZONE_NAME
+;
+\$TTL    604800
+@       IN      SOA     ns1.$ZONE_NAME. admin.$ZONE_NAME. (
+                          2         ; Serial
+                     604800         ; Refresh
+                      86400         ; Retry
+                    2419200         ; Expire
+                     604800 )       ; Negative Cache TTL
+;
+@       IN      NS      ns1.$ZONE_NAME.
+@       IN      NS      ns2.$ZONE_NAME.
+@       IN      NS      ns3.$ZONE_NAME.
+@       IN      A       $DNS_VIRTUAL_IP  ; The DNS VIP
+
+ns1     IN      A       $DNS_SERVER_1_IP
+ns2     IN      A       $DNS_SERVER_2_IP
+ns3     IN      A       $DNS_SERVER_3_IP
+
+; Devices
+test     IN      A       192.168.159.100
+EOF
+
+# Restart the bind service
+systemctl restart bind9
+
+# Create the health check script to check that bind is running
+cat <<EOF > /etc/keepalived/check_bind.sh
+#!/bin/bash
+
+if pidof named > /dev/null; then
+    exit 0
+else
+    exit 1
+fi
+EOF
+
+Make the health check script executable
+chmod +x /etc/keepalived/check_bind.sh
+
+# Create the keepalived configuration file
+cat <<EOF > /etc/keepalived/keepalived.conf
+vrrp_script check_bind {
+    script "/etc/keepalived/check_bind.sh"
+    interval 2
+    weight -30
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface $INTERFACE
+    virtual_router_id 55
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass dGrGtCxLBzoB5r6ekeAU
+    }
+    virtual_ipaddress {
+        $DNS_VIRTUAL_IP/24
+    }
+    track_script {
+        check_bind
+    }
+}
+EOF
+
+# Start the keepalived service
+systemctl enable --now keepalived
+
