@@ -107,6 +107,9 @@ cat <<EOF > /etc/keepalived/keepalived.conf
 vrrp_script check_bind {
     script "/etc/keepalived/check_bind.sh"
     interval 2
+    timeout 2
+    fall 2
+    rise 2
     weight -30
 }
 
